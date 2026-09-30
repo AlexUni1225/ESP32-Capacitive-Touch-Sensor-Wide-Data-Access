@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 Live Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f0f2f5;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .dashboard-card {
+            background-color: white;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.1);
+            width: 100%;
+            max-width: 800px;
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        h1 { color: #1a73e8; margin-top: 0; }
+        p { color: #5f6368; }
+        .latest-value {
+            font-size: 2.5em;
+            font-weight: bold;
+            color: #34a853;
+            margin: 10px 0;
+        }
+        
+        /* Data List Styles */
+        .data-archive {
+            text-align: left;
+            margin-top: 20px;
+        }
+        .data-row {
+            padding: 8px 12px;
+            border-bottom: 1px solid #eee;
+            color: #333;
+        }
+        .data-row:nth-child(even) {
+            background-color: #fafafa;
+        }
+        
+        /* Pagination Styles */
+        .pagination {
+            margin-top: 20px;
+            display: flex;
+            justify-content: center;
+            gap: 5px;
+            flex-wrap: wrap;
+        }
+        .pagination button {
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            background-color: white;
+            color: #1a73e8;
+            cursor: pointer;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+        .pagination button:hover {
+            background-color: #f0f2f5;
+        }
+        .pagination button.active {
+            background-color: #1a73e8;
+            color: white;
+            border-color: #1a73e8;
+        }
+        .pagination span {
+            padding: 8px;
+            color: #888;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="dashboard-card">
+        <h1>ESP32 Sensor Dashboard</h1>
+        <p>Live capacitive touch readings fetched directly from Firebase.</p>
+        
+        <div class="latest-value" id="currentValue">--</div>
+        
+        <canvas id="sensorChart"></canvas>
+
+        <div class="data-archive">
+            <h3 style="color: #1a73e8; border-bottom: 2px solid #eee; padding-bottom: 10px;">Full Data Archive</h3>
+            <div id="dataList">
+                <!-- List items will be injected here -->
+            </div>
+            <div class="pagination" id="paginationControls">
+                <!-- Pagination buttons will be injected here -->
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // REPLACE THIS WITH YOUR FIREBASE URL
+        const FIREBASE_URL = "https://live-cts-data-register-default-rtdb.firebaseio.com/touchData.json";
+
+        // Global variables for the archive list
+        let allSensorData = [];
+        let currentPage = 1;
+        const ITEMS_PER_PAGE = 20;
+
+        const ctx = document.getElementById('sensorChart').getContext('2d');
+        const sensorChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [], 
+                datasets: [{
+                    label: 'Touch Value (Last 50)',
+                    data: [], 
+                    borderColor: '#1a73e8',
+                    backgroundColor: 'rgba(26, 115, 232, 0.1)',
+                    borderWidth: 2,
+                    fill: true,
+                    tension: 0.3
+                }]
+            },
+            options: {
+                animation: false, 
+                scales: {
+                    y: { beginAtZero: true }
+                }
+            }
+        });
+
+        async function updateDashboard() {
+            try {
+                const response = await fetch(FIREBASE_URL);
+                const data = await response.json();
+
+                if (data) {
+                    allSensorData = Object.values(data).map(entry => entry.touch_value);
+                    
+                    // Update the large text number
+                    const latestReading = allSensorData[allSensorData.length - 1];
+                    document.getElementById('currentValue').innerText = `Current: ${latestReading}`;
+
+                    // UPDATE GRAPH (Limit to last 50)
+                    const graphValues = allSensorData.slice(-50);
+                    // Generate correct sample numbers for the graph labels
+                    const totalSamples = allSensorData.length;
+                    const startIndex = Math.max(0, totalSamples - 50);
+                    const graphLabels = Array.from({length: graphValues.length}, (_, i) => startIndex + i + 1);
+
+                    sensorChart.data.labels = graphLabels;
+                    sensorChart.data.datasets[0].data = graphValues;
+                    sensorChart.update();
+
+                    // UPDATE ARCHIVE LIST
+                    renderArchive();
+                }
+            } catch (error) {
+                console.error("Error fetching data: ", error);
+            }
+        }
+
+        function renderArchive() {
+            const totalPages = Math.ceil(allSensorData.length / ITEMS_PER_PAGE) || 1;
+            
+            // If new data pushes us to a new page, don't strand the user past the max page
+            if (currentPage > totalPages) currentPage = totalPages;
+
+            // Calculate start and end indices for the current page
+            const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
+            const endIndex = startIndex + ITEMS_PER_PAGE;
+            const pageData = allSensorData.slice(startIndex, endIndex);
+
+            // Build the list HTML
+            let listHtml = "";
+            pageData.forEach((val, index) => {
+                const sampleNumber = startIndex + index + 1;
+                listHtml += `<div class="data-row">Sample #${sampleNumber}: ${val}</div>`;
+            });
+            document.getElementById('dataList').innerHTML = listHtml;
+
+            // Build the pagination controls
+            renderPaginationControls(totalPages);
+        }
+
+        function renderPaginationControls(totalPages) {
+            let html = `<button onclick="changePage(1)">&lt; First</button>`;
+
+            // Logic to show a sliding window of up to 9 page buttons
+            let startPage = Math.max(1, currentPage - 4);
+            let endPage = Math.min(totalPages, startPage + 8);
+            
+            // Adjust start page if we are near the end
+            if (endPage - startPage < 8) {
+                startPage = Math.max(1, endPage - 8);
+            }
+
+            for (let i = startPage; i <= endPage; i++) {
+                if (i === currentPage) {
+                    html += `<button class="active" onclick="changePage(${i})">${i}</button>`;
+                } else {
+                    html += `<button onclick="changePage(${i})">${i}</button>`;
+                }
+            }
+
+            if (endPage < totalPages) {
+                html += `<span>...</span>`;
+            }
+
+            html += `<button onclick="changePage(${totalPages})">Latest &gt;</button>`;
+            document.getElementById('paginationControls').innerHTML = html;
+        }
+
+        // Called when the user clicks a pagination button
+        window.changePage = function(pageNumber) {
+            currentPage = pageNumber;
+            renderArchive();
+        };
+
+        setInterval(updateDashboard, 500);
+        updateDashboard(); 
+    </script>
+</body>
+</html>
